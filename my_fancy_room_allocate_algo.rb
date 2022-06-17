@@ -11,14 +11,15 @@ def assign_rooms(bookings, num_of_rooms, rooms = nil)
   booking_data = bookings.map { |booking| data_format(booking) }.sort { |a, b| a[:checkin] <=> b[:checkin] }
   if rooms.nil?
     assign_rooms_without_lock(booking_data, num_of_rooms, results)
+    results
   else
     assign_rooms_with_lock(booking_data, num_of_rooms, results)
+    results.map.with_index { |r, i| { room: i + 1, bookings: r } }
   end
-  results
 end
 
 # assign rooms
-# @param {Json[]} bookings
+# @param {Json[]} booking_data
 # @param {Integer} num_of_rooms
 # @param {Integer[][]} results
 # @param {Time[]} lastest_checkouts
