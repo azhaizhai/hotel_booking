@@ -6,117 +6,108 @@ require 'time'
 # @param {Json[]} rooms
 # @return {Integer[][]}
 def assign_rooms(bookings, num_of_rooms, rooms = nil)
-  results = Array.new(num_of_rooms) { Array.new }
-  return results if bookings.empty?
+  return Array.new(num_of_rooms) { Array.new } if bookings.empty?
   booking_data = bookings.map { |booking| data_format(booking) }.sort { |a, b| a[:checkin] <=> b[:checkin] }
   if rooms.nil?
-    assign_rooms_without_lock(booking_data, num_of_rooms, results)
-    results
+    assign_rooms_without_lock(booking_data, num_of_rooms)
   else
-    assign_rooms_with_lock(booking_data, num_of_rooms, results)
-    results.map.with_index { |r, i| { room: i + 1, bookings: r } }
+    assign_rooms_with_lock(booking_data, num_of_rooms)
   end
 end
 
-# assign rooms
+# assign rooms without locked
 # @param {Json[]} booking_data
 # @param {Integer} num_of_rooms
-# @param {Integer[][]} results
-# @param {Time[]} lastest_checkouts
-# @param {Integer} exclude_room
-# @return {void}
-def assign_rooms_without_lock(booking_data, num_of_rooms, results, lastest_checkouts = nil, exclude_room = nil)
-  lastest_checkouts ||= Array.new(num_of_rooms)
+# @return {Integer[][]}
+def assign_rooms_without_lock(booking_data, num_of_rooms)
+  results = Array.new(num_of_rooms).map { |a| {} }
   booking_data.each do |booking|
-    flag = false
-    if results[0].empty?
-      results[0] << booking[:id]
-      lastest_checkouts[0] = booking[:checkout]
-      next
-    end
-
-    time_length = -1
-    insert_index = -1
-    num_of_rooms.times do |index|
-      next if exclude_room == index
-      if results[index].empty?
-        if time_length < 0
-          results[index] << booking[:id]
-          lastest_checkouts[index] = booking[:checkout]
-          flag = true
-          break
-        else
-          break
-        end
-      end
-
-      temp_time_length = booking[:checkin] - lastest_checkouts[index]
-      if temp_time_length == 0
-        results[index] << booking[:id]
-        lastest_checkouts[index] = booking[:checkout]
-        flag = true
-        insert_index = -1
-        break
-      elsif temp_time_length > 0
-        if time_length < 0 || time_length > temp_time_length
-          time_length = temp_time_length
-          insert_index = index
-        end
-      end
-    end
-
-    if insert_index != -1
-      results[insert_index] << booking[:id]
-      lastest_checkouts[insert_index] = booking[:checkout]
-      flag = true
-    end
-
-    raise_error unless flag
+    add_booking(booking, results)
   end
-  nil
+  results.map { |r| r[:bookings]&.map{ |b| b[:id]} }
 end
 
-# assign rooms
+# assign rooms with locked
 # @param {Json[]} bookings
 # @param {Integer} num_of_rooms
-# @param {Integer[][]} results
-# @param {Json[]} rooms
-# @return {void}
-def assign_rooms_with_lock(booking_data, num_of_rooms, results)
+# @return {Json[]}
+def assign_rooms_with_lock(booking_data, num_of_rooms)
+  results = Array.new(num_of_rooms).map { |a| {} }
   booking_data = booking_data.group_by { |booking| booking[:locked] }
-  lastest_checkouts = Array.new(num_of_rooms)
-  if booking_data[true].empty?
-    assign_rooms_without_lock(booking_data[false], num_of_rooms, results)
-    return
-  end
+  booking_data[true] = booking_data[true] || []
+  booking_data[false] = booking_data[false] || []
 
   while !booking_data[false].empty? && !booking_data[true].empty?
-    booking = booking_data[false][0]
+    unlock_booking = booking_data[false][0]
     lock_booking = booking_data[true][0]
-    if booking[:checkin] >= lock_booking[:checkin]
-      results[lock_booking[:room_id] - 1] << lock_booking[:id]
-      lastest_checkouts[lock_booking[:room_id] - 1] = lock_booking[:checkout]
-      booking_data[true].shift
-    else
-      if booking[:checkout] <= lock_booking[:checkin]
-        assign_rooms_without_lock([booking], num_of_rooms, results, lastest_checkouts)
-      else
-        assign_rooms_without_lock([booking], num_of_rooms, results, lastest_checkouts, lock_booking[:room_id] - 1)
-      end
+    if unlock_booking[:checkout] <= lock_booking[:checkin]
+      add_booking(unlock_booking, results)
       booking_data[false].shift
+    else
+      if unlock_booking[:checkin] <= lock_booking[:checkin]
+        exclude_rooms = booking_data[true].select { |bd| bd[:checkin] < unlock_booking[:checkout] }.map { |bd| bd[:room_id] }.uniq
+        add_booking(unlock_booking, results, exclude_rooms)
+        booking_data[false].shift
+      else
+        room_index = results.index { |r| r[:room_id] == lock_booking[:room_id] }
+        if room_index.nil?
+          add_booking(lock_booking, results)
+        else
+          results[room_index][:bookings] << lock_booking
+        end
+        booking_data[true].shift
+      end
     end
   end
 
   while !booking_data[false].empty?
-    assign_rooms_without_lock(booking_data[false], num_of_rooms, results, lastest_checkouts)
-    return
+    add_booking(booking_data[false].shift, results)
   end
 
   while !booking_data[true].empty?
-    booking = booking_data[true].shift
-    results[booking[:room_id] - 1] << booking[:id]
+    lock_booking = booking_data[true].shift
+    room_index = results.index { |r| r[:room_id] == lock_booking[:room_id] }
+    if room_index.nil?
+      add_booking(lock_booking, results)
+    else
+      results[room_index][:bookings] << lock_booking
+    end
+    booking_data[true].shift
   end
   
+  results.map{ |r| {bookings: r[:bookings]&.map{ |b| b[:id]}, room_id: r[:room_id]} }
+end
+
+# assign single room
+# @param {Json} booking
+# @param {Integer[]} results
+# @param {Integer[]} exclude_rooms
+# @return {void}
+def add_booking(booking, results, exclude_rooms = [])
+  time_length = -1
+  insert_index = -1
+  results.length.times do |i|
+    next if exclude_rooms.include?(results[i][:room_id])
+    if results[i][:bookings].nil?
+      if insert_index == -1
+        results[i] = {bookings: [booking] }
+        results[i][:room_id] = booking[:room_id] if results[i][:room_id].nil? && !booking[:room_id].nil?
+        return
+      end
+      break
+    end
+    temp_time_length = booking[:checkin] - results[i][:bookings].last[:checkout]
+    if temp_time_length >= 0
+      if time_length < 0 || time_length > temp_time_length
+        time_length = temp_time_length
+        insert_index = i
+      end
+    end
+  end
+  if insert_index != -1
+    results[insert_index][:bookings] << booking
+    results[insert_index][:room_id] = booking[:room_id] if results[insert_index][:room_id].nil? && !booking[:room_id].nil?
+  end
   nil
 end
 
